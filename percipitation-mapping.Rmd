@@ -1,0 +1,192 @@
+---
+title: "percipitation-mapping"
+author: "jt-miller"
+date: "2023-04-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Percipitation Desert Mapping 
+
+Libraries
+```{r}
+# Install the necessary packages
+#remotes::install_github("mikejohnson51/AOI") # suggested!
+#remotes::install_github("mikejohnson51/climateR")
+# Call libraries 
+library(AOI)
+library(climateR)
+library(sf)
+library(tidyverse)
+library(ggplot2)
+library(raster)
+library(terra)
+library(tidyr)
+library(tidyterra)
+```
+```{r}
+# Read in shapefiles of the NA deserts of interest 
+
+na_ecoregions_3 <- sf::read_sf("/blue/soltis/millerjared/Desert-Bees-Plants/raw-data/shapefiles/NA_CEC_Eco_Level3.shp")
+
+# Subset out shapefiles to include only our deserts of interest 
+na_deserts_3 <- subset(na_ecoregions_3, NA_L3NAME %in% c("Sonoran Desert", "Mojave Basin and Range"))# %>% 
+ # sf::st_transform(crs = 4326)
+
+# Create grids for these ecoregions...
+mojave <- subset(na_deserts_3, NA_L3NAME == "Mojave Basin and Range")
+sonoran <- subset(na_deserts_3, NA_L3NAME == "Sonoran Desert" )
+
+sonoran_t <- st_transform(sonoran, crs = 4326)
+# Assign Cellside 
+cellside <- 10000 # 10,000 m = 10km
+mojave_grid_o <- sf::st_make_grid(mojave, 
+                                cellsize = cellside,
+                                what = "centers") # cellsize = 10km x 10km 
+mojave_grid <- sf::st_intersection(mojave_grid_o, mojave)
+
+# And create buffers
+D = cellside
+d = D/2 # give radius of each cell
+mojave_b <- sf::st_buffer(mojave_grid, 
+                          dist = d)
+
+sonoran_grid_o <- sf::st_make_grid(sonoran, 
+                                cellsize = cellside) # cellsize = 10km x 10km 
+sonoran_grid <- sf::st_intersection(sonoran_grid_o, sonoran)
+
+sonoran_b <- sf::st_buffer(sonoran_grid, 
+                          dist = d)
+
+
+
+```
+
+Plot these regions out 
+```{r}
+ggplot() + 
+  geom_sf(sonoran_b, mapping = aes()) + 
+  theme_bw() +
+  ggtitle("Mojave & Sonoran Ecoregions")
+```
+Create Custom Boundary Pull for Climate data
+```{r}
+sonoran_aoi <- st_as_sfc(sonoran_t, crs = 4326)
+tc = getTerraClim(sonoran_aoi, varname = "pet", startDate = "1990-01-01", endDate = "1990-12-31")
+#chirps = getCHIRPS(na_deserts_3, startDate = "1990-01-01", endDate = "1990-12-01" )
+```
+
+```{r}
+# Change CRS 
+tcdf <- terra::as.data.frame(tc[[1]], xy=TRUE, na.rm = TRUE)
+
+
+sonoran_b_reproj <- st_transform(sonoran_b, crs = 4326)
+
+```
+
+Plot
+```{r}
+library(patchwork)
+
+ggplot() +
+  geom_spatraster(data = tc$pet) +
+  facet_wrap(~lyr) +
+  scale_fill_whitebox_c(
+    palette = "muted",
+    na.value = "white"
+  ) + 
+  geom_sf(data = sonoran_aoi, fill = NA, lwd = 1, col = "black") + 
+  theme_minimal() 
+```
+
+### Extract data
+```{r}
+grid.sff <- sonoran_b_reproj %>%
+     st_as_sf() %>% 
+      mutate(ID = 1:n()) 
+
+centroid_ex <- terra::extract(tc[[1]], grid.sff)
+
+merged_df <- merge(grid.sff, centroid_ex, key = "ID")
+
+
+
+# Rejoin plot IDs with that of the buffered data 
+
+```
+
+### Analysis (prototype)
+
+First we want to take the avg percipitation per cell
+```{r}
+# Avg out precipitation across the buffered centroid. 
+agg_pet_avg <- aggregate(merged_df[, 2:14], list(merged_df$ID), mean)
+
+aggs <- st_drop_geometry(agg_pet_avg) # sf stuff messes with rowSums
+
+# Create a new field looking at the total percipitation 
+pet_total_df <- aggs%>% 
+  select(!'pet_1991-01-01 00:00:00_total') %>% 
+  mutate(total_pet = rowSums(.[2:13])) 
+ # mutate(winter_pet = rowSums(.[]))
+  
+joined_data <- left_join(pet_total_df, agg_pet_avg[,c(1,15)], by = "Group.1") # Join the spatial data back up
+
+
+joined_data_sf <- st_as_sf(joined_data, crs = 4326)
+
+# Create an overall full percipitation
+ggplot() + 
+  geom_sf(joined_data_sf, mapping = aes(fill = total_pet)) + 
+  theme_bw() +
+  ggtitle("Mojave percipitation totals")
+
+# Create a timeseries 
+# flip!
+joined_data_piv <- joined_data %>% 
+  pivot_longer(
+    cols = contains("pet"),
+    names_to = "pet_month", 
+    values_to = "pet_avg"
+  ) %>% 
+  mutate(pet_month = case_when(
+    grepl("1990-01-01", pet_month) ~ "Jan",
+    grepl("1990-01-31", pet_month) ~ "Feb",# Closest we can get...
+    grepl("1990-03-02", pet_month) ~ "Mar",
+    grepl("1990-04-02", pet_month) ~ "Apr",
+    grepl("1990-05-02", pet_month) ~ "May",
+    grepl("1990-06-02", pet_month) ~ "Jun",
+    grepl("1990-07-02", pet_month) ~ "Jul",
+    grepl("1990-08-01", pet_month) ~ "Aug", 
+    grepl("1990-09-01", pet_month) ~ "Sep", 
+    grepl("1990-10-01", pet_month) ~ "Oct",
+    grepl("1990-11-01", pet_month) ~ "Nov",
+    grepl("1990-12-01", pet_month) ~ "Dec",
+    
+    
+    TRUE ~ pet_month
+  )) %>% 
+  filter(!pet_month =="total_pet")
+joined_data_piv$pet_month = factor(joined_data_piv$pet_month, levels = month.abb)
+joined_data_piv_t <- joined_data_piv %>% 
+  filter(Group.1 == 1)
+
+joined_data_piv_t %>% 
+  ggplot(aes(x = pet_month, group = 1)) +
+    geom_bar(aes(y = pet_avg), stat = "identity", fill = "lightblue")
+```
+```{r}
+# Create an aggregation of data for Winters vs Summers rains as percentages
+joined_data_w_s <- joined_data %>% 
+  #group_by(Group.1) %>% 
+  mutate(winter_rain = rowSums(.[2,13]))
+aggregate(joined_data[, 2:14], list(merged_df$ID), sum)
+```
+
+
+
+
