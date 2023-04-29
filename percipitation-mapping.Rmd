@@ -41,25 +41,25 @@ mojave <- subset(na_deserts_3, NA_L3NAME == "Mojave Basin and Range")
 sonoran <- subset(na_deserts_3, NA_L3NAME == "Sonoran Desert" )
 
 sonoran_t <- st_transform(sonoran, crs = 4326)
+mojave_t <- st_transform(mojave, crs = 4326)
 # Assign Cellside 
 cellside <- 10000 # 10,000 m = 10km
 mojave_grid_o <- sf::st_make_grid(mojave, 
-                                cellsize = cellside,
-                                what = "centers") # cellsize = 10km x 10km 
+                                cellsize = cellside) # cellsize = 10km x 10km 
 mojave_grid <- sf::st_intersection(mojave_grid_o, mojave)
 
 # And create buffers
 D = cellside
 d = D/2 # give radius of each cell
-mojave_b <- sf::st_buffer(mojave_grid, 
-                          dist = d)
+# mojave_b <- sf::st_buffer(mojave_grid, 
+#                           dist = d)
 
 sonoran_grid_o <- sf::st_make_grid(sonoran, 
                                 cellsize = cellside) # cellsize = 10km x 10km 
 sonoran_grid <- sf::st_intersection(sonoran_grid_o, sonoran)
 
-sonoran_b <- sf::st_buffer(sonoran_grid, 
-                          dist = d)
+# sonoran_b <- sf::st_buffer(sonoran_grid, 
+#                           dist = d)
 
 
 
@@ -68,26 +68,174 @@ sonoran_b <- sf::st_buffer(sonoran_grid,
 Plot these regions out 
 ```{r}
 ggplot() + 
-  geom_sf(sonoran_b, mapping = aes()) + 
+  geom_sf(sonoran_grid, mapping = aes()) + 
   theme_bw() +
   ggtitle("Mojave & Sonoran Ecoregions")
 ```
 Create Custom Boundary Pull for Climate data
 ```{r}
-sonoran_aoi <- st_as_sfc(sonoran_t, crs = 4326)
-tc = getTerraClim(sonoran_aoi, varname = "pet", startDate = "1990-01-01", endDate = "1990-12-31")
-#chirps = getCHIRPS(na_deserts_3, startDate = "1990-01-01", endDate = "1990-12-01" )
+
+# Check the assets for relevant info 
+p <- climateR::params
+p_tr <- filter(p, grepl("terraclim", id))
+p_ppt <- filter(p_tr, varname == "ppt" ) # Relevant info for our percipitation pulls 
+
+# Create AOIs for our pulls, define the crs to be the same as that of the percipitation data (unsure how necessary this is as it wasnt illustrated in the prior example but lets go with it)
+
+sonoran_t <- st_transform(sonoran, crs = "+proj=longlat +a=6378137 +f=0.00335281066474748 +pm=0 +no_defs")
+mojave_t <- st_transform(mojave, crs = "+proj=longlat +a=6378137 +f=0.00335281066474748 +pm=0 +no_defs")
+
+sonoran_aoi <- st_as_sfc(sonoran_t, crs = "+proj=longlat +a=6378137 +f=0.00335281066474748 +pm=0 +no_defs") # Assign the WGS84 Projection 
+mojave_aoi <- st_as_sfc(mojave_t, crs = "+proj=longlat +a=6378137 +f=0.00335281066474748 +pm=0 +no_defs")
+
+
+tc = getTerraClim(sonoran_aoi, varname = "ppt", startDate = "1990-01-01", endDate = "1990-12-31") # Monthly data
+terra::res(tc[[1]]) # 1/24th of a degree = 4x4km resolution
+#chirps = getCHIRPS(na_deserts_3, startDate = "1990-01-01", endDate = "1990-12-01" ) # Chirps is daily data, lets start out with monthly for now
 ```
 
+Pull the Percipitation data out of the select Raster Layer
 ```{r}
 # Change CRS 
-tcdf <- terra::as.data.frame(tc[[1]], xy=TRUE, na.rm = TRUE)
+tcdf <- terra::as.data.frame(tc[[1]], xy=TRUE, na.rm = TRUE) # Pull out the TerraClim Raster info 
+```
 
+Now we have xy coords which are 4x4 kms, We are looking to summarize these into our grid cells
+```{r}
+# Transform grids out of equal area to that of WGS84
+sonoran_g_reproj <- st_transform(sonoran_grid, crs = "+proj=longlat +a=6378137 +f=0.00335281066474748 +pm=0 +no_defs")
 
-sonoran_b_reproj <- st_transform(sonoran_b, crs = 4326)
+mojave_g_reproj <- st_transform(mojave_grid, crs = "+proj=longlat +a=6378137 +f=0.00335281066474748 +pm=0 +no_defs")
+
+# Assign IDs
+sonoran_g_reproj <- sonoran_g_reproj %>%
+  st_as_sf() %>% 
+  mutate(ID = 1:n())
+# Assign CRS 
+tcdf_sf <- st_as_sf(tcdf, coords = c("x","y"), crs =  "+proj=longlat +a=6378137 +f=0.00335281066474748 +pm=0 +no_defs")
+
+# Crop out the xy data by the sonoran region of interest
+tcdf_cropped <- tcdf_sf[sonoran_aoi,]
+
+# Group data into each of the grid cells
+
+tcdf_gridded <- st_join(tcdf_cropped, sonoran_g_reproj) # Join together by spatial coords 
+
 
 ```
 
+### Analysis (prototype)
+
+First we want to take the avg percipitation per cell
+```{r}
+# Avg out precipitation across the grid cells. 
+agg_pet_avg <- aggregate(tcdf_gridded[, 1:12], list(tcdf_gridded$ID), mean)
+
+aggs <- st_drop_geometry(agg_pet_avg) # sf stuff messes with rowSums
+
+# Create a new field looking at the total percipitation 
+pet_total_df <- aggs%>% 
+  #select(!'pet_1991-01-01 00:00:00_total') %>% 
+  mutate(total_ppt = rowSums(.[2:13])) 
+ # mutate(winter_pet = rowSums(.[]))
+  
+joined_data <- left_join(pet_total_df, agg_pet_avg[,c(1,14)], by = "Group.1") # Join the spatial data back up
+
+
+
+joined_data_sf <- st_as_sf(joined_data)
+
+# Of particular note, May has "0"s listed for many points. I presume that this is not actually 0, as 0.0 (floats) are used to denote this. Likely NA as in not measured? 
+
+# Create an overall full percipitation
+ggplot() + 
+  geom_sf(joined_data_sf, mapping = aes(fill = total_ppt)) + 
+  theme_bw() +
+  ggtitle("Mojave percipitation totals")
+
+# Create a timeseries 
+# flip!
+joined_data_piv <- joined_data %>% 
+  pivot_longer(
+    cols = contains("ppt_"),
+    names_to = "ppt_month", 
+    values_to = "ppt_avg"
+   ) %>%
+   mutate(ppt_month = case_when(
+     grepl("1990-01-01", ppt_month) ~ "Jan",
+     grepl("1990-01-31", ppt_month) ~ "Feb",# Closest we can get...
+     grepl("1990-03-02", ppt_month) ~ "Mar",
+     grepl("1990-04-02", ppt_month) ~ "Apr",
+     grepl("1990-05-02", ppt_month) ~ "May",
+     grepl("1990-06-02", ppt_month) ~ "Jun",
+     grepl("1990-07-02", ppt_month) ~ "Jul",
+     grepl("1990-08-01", ppt_month) ~ "Aug",
+     grepl("1990-09-01", ppt_month) ~ "Sep",
+     grepl("1990-10-01", ppt_month) ~ "Oct",
+     grepl("1990-11-01", ppt_month) ~ "Nov",
+     grepl("1990-12-01", ppt_month) ~ "Dec",
+
+
+     TRUE ~ ppt_month
+    ))
+
+# Now calc the %percipitation per month to make our bar charts more informative
+joined_data_piv <- joined_data_piv %>%
+  group_by(Group.1, ppt_month) %>% 
+  mutate(avg_month_ppt_percent = (ppt_avg/total_ppt)) %>% 
+  mutate(avg_month_ppt_percent = round(avg_month_ppt_percent, digits = 4))
+
+x <- c("Nov", "Dec", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct")
+ joined_data_piv$ppt_month = factor(joined_data_piv$ppt_month, levels = x)
+ y <-  factor(joined_data_piv$ppt_month, levels = x)
+ joined_data_piv_t <- joined_data_piv %>%
+   filter(Group.1 == 1)
+my_outlines <- c("darkblue", "darkblue", "darkblue", "darkblue", "darkblue",  "grey", "grey", "grey" , "darkorange", "darkorange", "darkorange" ,"grey")
+
+scale_fill_ppt_months <- function(...){
+    ggplot2:::manual_scale(
+        'fill', 
+        values = setNames(c("darkblue", "darkblue", "darkblue", "darkblue", "darkblue",  "grey", "grey", "grey" , "darkorange", "darkorange", "darkorange" ,"grey"), levels(y)), 
+        ...
+    )
+}
+
+scale_color_ppt_months <- function(...){
+    ggplot2:::manual_scale(
+        'color', 
+        values = setNames(c("darkblue", "darkblue", "darkblue", "darkblue", "darkblue",  "grey", "grey", "grey" , "darkorange", "darkorange", "darkorange" ,"grey"), levels(y)), 
+        ...
+    )
+}
+
+names(my_outlines) <- levels(factor(levels(joined_data_piv$ppt_month)))
+my_cols <- scale_fill_manual(name = "ppt_month", values = my_outlines)
+
+
+ggplot(joined_data_piv_t, aes(x = ppt_month, y = ppt_avg,color = ppt_month)) +
+  geom_bar(stat = "identity", fill = "lightblue") + 
+  geom_text(aes( label = scales::percent(avg_month_ppt_percent),
+                   y=ppt_avg), stat= "identity", vjust = -.5) +
+  scale_color_ppt_months() + 
+  theme_bw()
+
+```
+
+
+
+
+
+
+
+
+
+```{r}
+# Create an aggregation of data for Winters vs Summers rains as percentages
+joined_data_w_s <- joined_data %>% 
+  #group_by(Group.1) %>% 
+  mutate(winter_rain = rowSums(.[2,13]))
+aggregate(joined_data[, 2:14], list(merged_df$ID), sum)
+```
 Plot
 ```{r}
 library(patchwork)
@@ -101,92 +249,13 @@ ggplot() +
   ) + 
   geom_sf(data = sonoran_aoi, fill = NA, lwd = 1, col = "black") + 
   theme_minimal() 
-```
-
-### Extract data
-```{r}
-grid.sff <- sonoran_b_reproj %>%
-     st_as_sf() %>% 
-      mutate(ID = 1:n()) 
-
-centroid_ex <- terra::extract(tc[[1]], grid.sff)
-
-merged_df <- merge(grid.sff, centroid_ex, key = "ID")
 
 
-
-# Rejoin plot IDs with that of the buffered data 
-
-```
-
-### Analysis (prototype)
-
-First we want to take the avg percipitation per cell
-```{r}
-# Avg out precipitation across the buffered centroid. 
-agg_pet_avg <- aggregate(merged_df[, 2:14], list(merged_df$ID), mean)
-
-aggs <- st_drop_geometry(agg_pet_avg) # sf stuff messes with rowSums
-
-# Create a new field looking at the total percipitation 
-pet_total_df <- aggs%>% 
-  select(!'pet_1991-01-01 00:00:00_total') %>% 
-  mutate(total_pet = rowSums(.[2:13])) 
- # mutate(winter_pet = rowSums(.[]))
-  
-joined_data <- left_join(pet_total_df, agg_pet_avg[,c(1,15)], by = "Group.1") # Join the spatial data back up
-
-
-joined_data_sf <- st_as_sf(joined_data, crs = 4326)
-
-# Create an overall full percipitation
 ggplot() + 
-  geom_sf(joined_data_sf, mapping = aes(fill = total_pet)) + 
-  theme_bw() +
-  ggtitle("Mojave percipitation totals")
+  geom_sf(tcdf_sf, mapping = aes()) # Doesnt actually crop...
 
-# Create a timeseries 
-# flip!
-joined_data_piv <- joined_data %>% 
-  pivot_longer(
-    cols = contains("pet"),
-    names_to = "pet_month", 
-    values_to = "pet_avg"
-  ) %>% 
-  mutate(pet_month = case_when(
-    grepl("1990-01-01", pet_month) ~ "Jan",
-    grepl("1990-01-31", pet_month) ~ "Feb",# Closest we can get...
-    grepl("1990-03-02", pet_month) ~ "Mar",
-    grepl("1990-04-02", pet_month) ~ "Apr",
-    grepl("1990-05-02", pet_month) ~ "May",
-    grepl("1990-06-02", pet_month) ~ "Jun",
-    grepl("1990-07-02", pet_month) ~ "Jul",
-    grepl("1990-08-01", pet_month) ~ "Aug", 
-    grepl("1990-09-01", pet_month) ~ "Sep", 
-    grepl("1990-10-01", pet_month) ~ "Oct",
-    grepl("1990-11-01", pet_month) ~ "Nov",
-    grepl("1990-12-01", pet_month) ~ "Dec",
-    
-    
-    TRUE ~ pet_month
-  )) %>% 
-  filter(!pet_month =="total_pet")
-joined_data_piv$pet_month = factor(joined_data_piv$pet_month, levels = month.abb)
-joined_data_piv_t <- joined_data_piv %>% 
-  filter(Group.1 == 1)
-
-joined_data_piv_t %>% 
-  ggplot(aes(x = pet_month, group = 1)) +
-    geom_bar(aes(y = pet_avg), stat = "identity", fill = "lightblue")
+ggplot() + 
+  geom_sf(tcdf_cropped, mapping = aes())
 ```
-```{r}
-# Create an aggregation of data for Winters vs Summers rains as percentages
-joined_data_w_s <- joined_data %>% 
-  #group_by(Group.1) %>% 
-  mutate(winter_rain = rowSums(.[2,13]))
-aggregate(joined_data[, 2:14], list(merged_df$ID), sum)
-```
-
-
 
 
