@@ -1,0 +1,374 @@
+---
+title: "percipitation-mapping"
+author: "jt-miller"
+date: "2023-04-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Percipitation Desert Mapping 
+
+Libraries
+```{r}
+# Install the necessary packages
+#remotes::install_github("mikejohnson51/AOI") # suggested!
+#remotes::install_github("mikejohnson51/climateR")
+# Call libraries 
+library(AOI)
+library(climateR)
+library(sf)
+library(tidyverse)
+library(ggplot2)
+library(raster)
+library(terra)
+library(tidyr)
+library(tidyterra)
+```
+```{r}
+# Read in shapefiles of the NA deserts of interest 
+
+na_ecoregions_3 <- sf::read_sf("/blue/soltis/millerjared/Desert-Bees-Plants/raw-data/shapefiles/NA_CEC_Eco_Level3.shp")
+
+# Subset out shapefiles to include only our deserts of interest 
+na_deserts_3 <- subset(na_ecoregions_3, NA_L3NAME %in% c("Sonoran Desert", "Mojave Basin and Range"))# %>% 
+ # sf::st_transform(crs = 4326)
+
+# Create grids for these ecoregions...
+mojave <- subset(na_deserts_3, NA_L3NAME == "Mojave Basin and Range")
+sonoran <- subset(na_deserts_3, NA_L3NAME == "Sonoran Desert" )
+
+sonoran_t <- st_transform(sonoran, crs = 4326)
+mojave_t <- st_transform(mojave, crs = 4326)
+# Assign Cellside 
+cellside <- 10000 # 10,000 m = 10km
+mojave_grid_o <- sf::st_make_grid(mojave, 
+                                cellsize = cellside) # cellsize = 10km x 10km 
+mojave_grid <- sf::st_intersection(mojave_grid_o, mojave)
+
+# And create buffers
+D = cellside
+d = D/2 # give radius of each cell
+# mojave_b <- sf::st_buffer(mojave_grid, 
+#                           dist = d)
+
+sonoran_grid_o <- sf::st_make_grid(sonoran, 
+                                cellsize = cellside) # cellsize = 10km x 10km 
+sonoran_grid <- sf::st_intersection(sonoran_grid_o, sonoran)
+
+# sonoran_b <- sf::st_buffer(sonoran_grid, 
+#                           dist = d)
+
+
+
+```
+
+Plot these regions out 
+```{r}
+ggplot() + 
+  geom_sf(sonoran_grid, mapping = aes()) + 
+  theme_bw() +
+  ggtitle("Mojave & Sonoran Ecoregions")
+```
+Create Custom Boundary Pull for Climate data
+```{r}
+
+# Check the assets for relevant info 
+p <- climateR::params
+
+p_tr <- filter(p, grepl("terraclim", id))
+p_ppt <- filter(p_tr, varname == "ppt" ) # Relevant info for our percipitation pulls 
+
+# Create AOIs for our pulls, define the crs to be the same as that of the percipitation data (unsure how necessary this is as it wasnt illustrated in the prior example but lets go with it)
+
+sonoran_t <- st_transform(sonoran, crs = "+proj=longlat +a=6378137 +f=0.00335281066474748 +pm=0 +no_defs")
+mojave_t <- st_transform(mojave, crs = "+proj=longlat +a=6378137 +f=0.00335281066474748 +pm=0 +no_defs")
+
+sonoran_aoi <- st_as_sfc(sonoran_t, crs = "+proj=longlat +a=6378137 +f=0.00335281066474748 +pm=0 +no_defs") # Assign the WGS84 Projection 
+mojave_aoi <- st_as_sfc(mojave_t, crs = "+proj=longlat +a=6378137 +f=0.00335281066474748 +pm=0 +no_defs")
+
+
+tc = getTerraClim(sonoran_aoi, varname = "ppt", startDate = "1990-01-01", endDate = "1990-12-31") # Monthly data
+terra::res(tc[[1]]) # 1/24th of a degree = 4x4km resolution
+#chirps = getCHIRPS(na_deserts_3, startDate = "1990-01-01", endDate = "1990-12-01" ) # Chirps is daily data, lets start out with monthly for now
+```
+
+Pull the Percipitation data out of the select Raster Layer
+```{r}
+# Change CRS 
+tcdf <- terra::as.data.frame(tc[[1]], xy=TRUE, na.rm = TRUE) # Pull out the TerraClim Raster info 
+
+```
+
+Now we have xy coords which are 4x4 kms, We are looking to summarize these into our grid cells
+```{r}
+# Transform grids out of equal area to that of WGS84
+sonoran_g_reproj <- st_transform(sonoran_grid, crs = "+proj=longlat +a=6378137 +f=0.00335281066474748 +pm=0 +no_defs")
+
+mojave_g_reproj <- st_transform(mojave_grid, crs = "+proj=longlat +a=6378137 +f=0.00335281066474748 +pm=0 +no_defs")
+
+# Assign IDs
+sonoran_g_reproj <- sonoran_g_reproj %>%
+  st_as_sf() %>% 
+  mutate(ID = 1:n())
+# Assign CRS 
+tcdf_sf <- st_as_sf(tcdf, coords = c("x","y"), crs =  "+proj=longlat +a=6378137 +f=0.00335281066474748 +pm=0 +no_defs")
+
+# Crop out the xy data by the sonoran region of interest
+tcdf_cropped <- tcdf_sf[sonoran_aoi,]
+
+# Group data into each of the grid cells
+
+tcdf_gridded <- st_join(sonoran_g_reproj, tcdf_cropped) # Join together by spatial coords 
+
+
+
+dat = cbind(sonoran_g_reproj, exact_extract(tc[[1]], sonoran_g_reproj, "mean", progress = FALSE)) # testing exact_extract as a function, supposed to take the mean of each extraction? 
+
+```
+
+### Analysis (prototype)
+
+First we want to take the avg percipitation per cell
+```{r}
+# Avg out precipitation across the grid cells. 
+agg_pet_avg <- aggregate(tcdf_gridded[, 1:12], list(tcdf_gridded$ID), mean)
+
+aggs <- st_drop_geometry(agg_pet_avg) # sf stuff messes with rowSums
+
+# Create a new field looking at the total percipitation 
+pet_total_df <- aggs%>% 
+  #select(!'pet_1991-01-01 00:00:00_total') %>% 
+  mutate(total_ppt = rowSums(.[2:13])) 
+ # mutate(winter_pet = rowSums(.[]))
+  
+joined_data <- left_join(pet_total_df, agg_pet_avg[,c(1,14)], by = "Group.1") # Join the spatial data back up
+
+
+
+joined_data_sf <- st_as_sf(joined_data)
+
+# Of particular note, May has "0"s listed for many points. I presume that this is not actually 0, as 0.0 (floats) are used to denote this. Likely NA as in not measured? 
+
+# Create an overall full percipitation
+ggplot() + 
+  geom_sf(joined_data_sf, mapping = aes(fill = total_ppt)) + 
+  theme_bw() +
+  ggtitle("Mojave percipitation totals")
+
+# Create a timeseries 
+# flip!
+joined_data_piv <- joined_data %>% 
+  pivot_longer(
+    cols = contains("ppt_"),
+    names_to = "ppt_month", 
+    values_to = "ppt_avg"
+   ) %>%
+   mutate(ppt_month = case_when(
+     grepl("1990-01-01", ppt_month) ~ "Jan",
+     grepl("1990-01-31", ppt_month) ~ "Feb",# Closest we can get...
+     grepl("1990-03-02", ppt_month) ~ "Mar",
+     grepl("1990-04-02", ppt_month) ~ "Apr",
+     grepl("1990-05-02", ppt_month) ~ "May",
+     grepl("1990-06-02", ppt_month) ~ "Jun",
+     grepl("1990-07-02", ppt_month) ~ "Jul",
+     grepl("1990-08-01", ppt_month) ~ "Aug",
+     grepl("1990-09-01", ppt_month) ~ "Sep",
+     grepl("1990-10-01", ppt_month) ~ "Oct",
+     grepl("1990-11-01", ppt_month) ~ "Nov",
+     grepl("1990-12-01", ppt_month) ~ "Dec",
+
+
+     TRUE ~ ppt_month
+    ))
+
+# Now calc the %percipitation per month to make our bar charts more informative
+joined_data_piv <- joined_data_piv %>%
+  group_by(Group.1, ppt_month) %>% 
+  mutate(avg_month_ppt_percent = (ppt_avg/total_ppt)) %>% 
+  mutate(avg_month_ppt_percent = round(avg_month_ppt_percent, digits = 4))
+
+x <- c("Nov", "Dec", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct")
+ joined_data_piv$ppt_month = factor(joined_data_piv$ppt_month, levels = x)
+ y <-  factor(joined_data_piv$ppt_month, levels = x)
+ joined_data_piv_t <- joined_data_piv %>%
+   filter(Group.1 == 1)
+my_outlines <- c("darkblue", "darkblue", "darkblue", "darkblue", "darkblue",  "grey", "grey", "grey" , "darkorange", "darkorange", "darkorange" ,"grey")
+
+scale_fill_ppt_months <- function(...){
+    ggplot2:::manual_scale(
+        'fill', 
+        values = setNames(c("darkblue", "darkblue", "darkblue", "darkblue", "darkblue",  "grey", "grey", "grey" , "darkorange", "darkorange", "darkorange" ,"grey"), levels(y)), 
+        ...
+    )
+}
+
+scale_color_ppt_months <- function(...){
+    ggplot2:::manual_scale(
+        'color', 
+        values = setNames(c("darkblue", "darkblue", "darkblue", "darkblue", "darkblue",  "grey", "grey", "grey" , "darkorange", "darkorange", "darkorange" ,"grey"), levels(y)), 
+        ...
+    )
+}
+
+names(my_outlines) <- levels(factor(levels(joined_data_piv$ppt_month)))
+my_cols <- scale_fill_manual(name = "ppt_month", values = my_outlines)
+
+
+ggplot(joined_data_piv_t, aes(x = ppt_month, y = ppt_avg,color = ppt_month)) +
+  geom_bar(stat = "identity", fill = "lightblue") + 
+  geom_text(aes( label = scales::percent(avg_month_ppt_percent),
+                   y=ppt_avg), stat= "identity", vjust = -.5, show.legend = FALSE) +
+  scale_color_ppt_months() + 
+  ggtitle("Sample Site 10x10 km^2 1990 Percipitation Averaged by Month") +
+  
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ylab("percipitation (mm)") +
+  xlab("month") 
+
+
+```
+```{r}
+# Testing with Extract...
+
+# flip!
+joined_data_piv_t <- dat %>% 
+  pivot_longer(
+    cols = contains("ppt_"),
+    names_to = "ppt_month", 
+    values_to = "ppt_avg"
+   ) %>%
+   mutate(ppt_month = case_when(
+     grepl("1990.01.01", ppt_month) ~ "Jan",
+     grepl("1990.01.31", ppt_month) ~ "Feb",# Closest we can get...
+     grepl("1990.03.02", ppt_month) ~ "Mar",
+     grepl("1990.04.02", ppt_month) ~ "Apr",
+     grepl("1990.05.02", ppt_month) ~ "May",
+     grepl("1990.06.02", ppt_month) ~ "Jun",
+     grepl("1990.07.02", ppt_month) ~ "Jul",
+     grepl("1990.08.01", ppt_month) ~ "Aug",
+     grepl("1990.09.01", ppt_month) ~ "Sep",
+     grepl("1990.10.01", ppt_month) ~ "Oct",
+     grepl("1990.11.01", ppt_month) ~ "Nov",
+     grepl("1990.12.01", ppt_month) ~ "Dec",
+
+
+     TRUE ~ ppt_month
+    )) %>% 
+  filter(!ppt_month == "mean.ppt_1991.01.01.00.00.00_total") # Extraneous month grabbed 
+
+joined_data_piv_t <- joined_data_piv_t %>%
+  group_by(ID) %>% 
+  mutate(total_ppt = sum(ppt_avg)) %>% 
+  mutate(avg_month_ppt_percent = (ppt_avg/total_ppt)) %>% 
+  mutate(avg_month_ppt_percent = round(avg_month_ppt_percent, digits = 4))
+
+
+x <- c("Nov", "Dec", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct")
+ joined_data_piv_t$ppt_month = factor(joined_data_piv_t$ppt_month, levels = x)
+ y <-  factor(joined_data_piv_t$ppt_month, levels = x)
+names(my_outlines) <- levels(factor(levels(joined_data_piv_t$ppt_month)))
+my_cols <- scale_fill_manual(name = "ppt_month", values = my_outlines)
+
+joined_data_piv_t2 <- joined_data_piv_t[1:12,]
+
+ggplot(joined_data_piv_t2, aes(x = ppt_month, y = ppt_avg,color = ppt_month)) +
+  geom_bar(stat = "identity", fill = "lightblue") + 
+  geom_text(aes( label = scales::percent(avg_month_ppt_percent),
+                   y=ppt_avg), stat= "identity", vjust = -.5, show.legend = FALSE) +
+  scale_color_ppt_months() + 
+  ggtitle("Sample Site 10x10 km^2 1990 Percipitation Averaged by Month") +
+  
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ylab("percipitation (mm)") +
+  xlab("month") 
+
+```
+
+
+Further Summarize, create grid noting where the bimodal gradient occurs 
+```{r}
+# First create categories that define the winter & summer seasons for rainfall
+summer_rains <- c("Jul", "Aug", "Sep")
+winter_rains <- c("Nov", "Dec", "Jan", "Feb", "Mar")
+
+joined_w_seasons <- joined_data_piv %>%
+  mutate(rain_seasons = case_when(ppt_month %in% winter_rains ~ "winter_season",
+                                 ppt_month %in% summer_rains ~ "summer_season",
+                                TRUE ~ "else_months") )
+
+# Sum up percentages of annual mean ppt by season for each gridcell
+joined_w_season_o <- joined_w_seasons %>% 
+   group_by(Group.1, rain_seasons) %>% 
+   summarise(season_ppt_perc = sum(avg_month_ppt_percent))
+
+
+```
+
+# Join back up with the gridded map
+```{r}
+
+group_coords <- joined_w_seasons %>% 
+  group_by(Group.1) %>% 
+  distinct(rain_seasons, .keep_all = TRUE) %>% 
+  ungroup() %>% 
+  select(Group.1, geometry)
+  
+joined_w_season_o
+
+joined_gridded <-left_join(group_coords, joined_w_season_o, by = "Group.1") # Unsure whats happening with the duplication here? Possibly geometry messing things up 
+
+joined_gridded <- joined_gridded %>% 
+  distinct(Group.1, geometry, rain_seasons, season_ppt_perc, .keep_all = TRUE ) # Distinct on all columns, removing true duplicates
+
+joined_gridded <- st_as_sf(joined_gridded, crs = "+proj=longlat +a=6378137 +f=0.00335281066474748 +pm=0 +no_defs" )
+```
+
+# Create a plot! 
+```{r}
+ggplot(joined_gridded) +
+    geom_sf(aes(fill = (season_ppt_perc))) + # Log Transform, correct for log10(1) = 0
+    theme_bw() +
+    scale_fill_gradientn(
+      colours = colorRampPalette((RColorBrewer::brewer.pal(11, "YlOrRd")))(9), 
+      na.value = "#808080" # The line that denotes NAs as grey
+    ) +
+    
+    #ggtitle(paste0("Bee Sampling Intensity 10x10km Grid", "\n", region_name_v[[i]])) +
+    theme(axis.text.x = element_text(angle = 45, vjust = 0.5)) +
+    #ggtitle("Bee Sampling Intensity 10x10km Grid") +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    guides(fill=guide_legend(title="Log10 Occurrences"))
+```
+
+
+
+
+
+Plot
+```{r}
+library(patchwork)
+
+ggplot() +
+  geom_spatraster(data = tc$pet) +
+  facet_wrap(~lyr) +
+  scale_fill_whitebox_c(
+    palette = "muted",
+    na.value = "white"
+  ) + 
+  geom_sf(data = sonoran_aoi, fill = NA, lwd = 1, col = "black") + 
+  theme_minimal() 
+
+
+ggplot() + 
+  geom_sf(tcdf_sf, mapping = aes()) # Doesnt actually crop...
+
+ggplot() + 
+  geom_sf(tcdf_cropped, mapping = aes())
+```
+
+
