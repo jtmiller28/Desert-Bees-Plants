@@ -1,0 +1,29 @@
+---
+title: "bee-percipitation-trends-scratch"
+author: "jt-miller"
+date: "2023-05-04"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Here is my scratch work for trying to see if percipitation trends in the deserts plays a role in diversity for bees
+
+Hypothesis 1: The Two Distinct Rain Seasons facilitates increased diversity in the Sonoran Desert by opening up opportunity for different assemblages of (probably specialist) bees to inhabit this region.
+
+Exploratory Steps: 
+
+1. Identify sample grids of strong sampling for multiple years. How does sampling look across the year? 
+2. Look at the bee diversity via occurrence records, check to see if the summer vs winter assemblage contains the same or different species.
+      I. How Many species do these seasons contain? 
+      II. How much overlap is there between the seasons in bee species? How many unique species
+```{r}
+# Load in the Sonoran Bees 
+sonoran_bees <- read.delim("/blue/soltis/millerjared/pollen-project/Pollen-DB/processed-data/ecoregion-subset/bee_occurrence_data_Sonoran-Desert.txt")
+
+# Evaluate Areas with Equal Sampling Effort 
+
+```
+

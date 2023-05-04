@@ -27,41 +27,29 @@ library(terra)
 library(tidyr)
 library(tidyterra)
 ```
+
 ```{r}
 # Read in shapefiles of the NA deserts of interest 
 
 na_ecoregions_3 <- sf::read_sf("/blue/soltis/millerjared/Desert-Bees-Plants/raw-data/shapefiles/NA_CEC_Eco_Level3.shp")
 
 # Subset out shapefiles to include only our deserts of interest 
-na_deserts_3 <- subset(na_ecoregions_3, NA_L3NAME %in% c("Sonoran Desert", "Mojave Basin and Range"))# %>% 
- # sf::st_transform(crs = 4326)
+na_deserts_3 <- subset(na_ecoregions_3, NA_L3NAME %in% c("Sonoran Desert", "Mojave Basin and Range")) # Maintain Native CRS
 
 # Create grids for these ecoregions...
 mojave <- subset(na_deserts_3, NA_L3NAME == "Mojave Basin and Range")
 sonoran <- subset(na_deserts_3, NA_L3NAME == "Sonoran Desert" )
 
-sonoran_t <- st_transform(sonoran, crs = 4326)
-mojave_t <- st_transform(mojave, crs = 4326)
+
 # Assign Cellside 
 cellside <- 10000 # 10,000 m = 10km
 mojave_grid_o <- sf::st_make_grid(mojave, 
                                 cellsize = cellside) # cellsize = 10km x 10km 
 mojave_grid <- sf::st_intersection(mojave_grid_o, mojave)
 
-# And create buffers
-D = cellside
-d = D/2 # give radius of each cell
-# mojave_b <- sf::st_buffer(mojave_grid, 
-#                           dist = d)
-
 sonoran_grid_o <- sf::st_make_grid(sonoran, 
                                 cellsize = cellside) # cellsize = 10km x 10km 
 sonoran_grid <- sf::st_intersection(sonoran_grid_o, sonoran)
-
-# sonoran_b <- sf::st_buffer(sonoran_grid, 
-#                           dist = d)
-
-
 
 ```
 
@@ -69,42 +57,49 @@ Plot these regions out
 ```{r}
 ggplot() + 
   geom_sf(sonoran_grid, mapping = aes()) + 
+  geom_sf(mojave_grid, mapping = aes()) +
   theme_bw() +
   ggtitle("Mojave & Sonoran Ecoregions")
 ```
 Create Custom Boundary Pull for Climate data
 ```{r}
-
+# Using climateR for this analysis:
 # Check the assets for relevant info 
-p <- climateR::params
+p <- climateR::params # Pull out the relevant info for params 
 
-p_tr <- filter(p, grepl("terraclim", id))
-p_ppt <- filter(p_tr, varname == "ppt" ) # Relevant info for our percipitation pulls 
+p_tr <- filter(p, grepl("terraclim", id)) # Using TerraClim 
+p_ppt <- filter(p_tr, varname == "ppt" ) # Relevant info for our precipitation pulls 
 
 # Create AOIs for our pulls, define the crs to be the same as that of the percipitation data (unsure how necessary this is as it wasnt illustrated in the prior example but lets go with it)
 
+# First transform coordinate reference system to match the TerraClim's projection 
 sonoran_t <- st_transform(sonoran, crs = "+proj=longlat +a=6378137 +f=0.00335281066474748 +pm=0 +no_defs")
 mojave_t <- st_transform(mojave, crs = "+proj=longlat +a=6378137 +f=0.00335281066474748 +pm=0 +no_defs")
 
-sonoran_aoi <- st_as_sfc(sonoran_t, crs = "+proj=longlat +a=6378137 +f=0.00335281066474748 +pm=0 +no_defs") # Assign the WGS84 Projection 
-mojave_aoi <- st_as_sfc(mojave_t, crs = "+proj=longlat +a=6378137 +f=0.00335281066474748 +pm=0 +no_defs")
+# Assign AOI by screating an sfc object
+sonoran_aoi <- st_as_sfc(sonoran_t) 
+mojave_aoi <- st_as_sfc(mojave_t)
 
+# Construct Raster Pulls usign TerraClim
+sonoran_tc = getTerraClim(sonoran_aoi, varname = "ppt", startDate = "1990-01-01", endDate = "1990-12-31") # Monthly data ppt data
+mojave_tc <- getTerraClim(mojave_aoi, varname = "ppt", startDate = "1990-01-01", endDate = "1990-12-31")
 
-tc = getTerraClim(sonoran_aoi, varname = "ppt", startDate = "1990-01-01", endDate = "1990-12-31") # Monthly data
-terra::res(tc[[1]]) # 1/24th of a degree = 4x4km resolution
-#chirps = getCHIRPS(na_deserts_3, startDate = "1990-01-01", endDate = "1990-12-01" ) # Chirps is daily data, lets start out with monthly for now
+terra::res(sonoran_tc[[1]]) # 1/24th of a degree = 4x4km resolution
+
+# Chirps is daily data, Consider using it later on? 
+#chirps = getCHIRPS(na_deserts_3, startDate = "1990-01-01", endDate = "1990-12-01" )
 ```
 
 Pull the Percipitation data out of the select Raster Layer
 ```{r}
-# Change CRS 
+# Traditional way to pull out raster data via dataframe 
 tcdf <- terra::as.data.frame(tc[[1]], xy=TRUE, na.rm = TRUE) # Pull out the TerraClim Raster info 
 
 ```
 
 Now we have xy coords which are 4x4 kms, We are looking to summarize these into our grid cells
 ```{r}
-# Transform grids out of equal area to that of WGS84
+# Transform crs of the grids to match the crs of the raster data
 sonoran_g_reproj <- st_transform(sonoran_grid, crs = "+proj=longlat +a=6378137 +f=0.00335281066474748 +pm=0 +no_defs")
 
 mojave_g_reproj <- st_transform(mojave_grid, crs = "+proj=longlat +a=6378137 +f=0.00335281066474748 +pm=0 +no_defs")
@@ -122,12 +117,15 @@ tcdf_cropped <- tcdf_sf[sonoran_aoi,]
 # Group data into each of the grid cells
 
 tcdf_gridded <- st_join(sonoran_g_reproj, tcdf_cropped) # Join together by spatial coords 
-
-
-
-dat = cbind(sonoran_g_reproj, exact_extract(tc[[1]], sonoran_g_reproj, "mean", progress = FALSE)) # testing exact_extract as a function, supposed to take the mean of each extraction? 
-
 ```
+
+Another method as found on climateR's repo for extracting raster data 
+```{r}
+sonoran_dat = cbind(sonoran_g_reproj, exact_extract(sonoran_tc[[1]], sonoran_g_reproj, "mean", progress = FALSE)) # testing exact_extract as a function, supposed to take the mean of each extraction? 
+mojave_dat = cbind(mojave_g_reproj, exact_extract(mojave_tc[[1]], mojave_g_reproj, "mean", progress = FALSE))
+```
+
+
 
 ### Analysis (prototype)
 
@@ -287,6 +285,20 @@ ggplot(joined_data_piv_t2, aes(x = ppt_month, y = ppt_avg,color = ppt_month)) +
   ylab("percipitation (mm)") +
   xlab("month") 
 
+
+
+```
+### Testing Grounds 
+```{r}
+# Finding the points according to the groupings...
+test <- joined_data_piv_t %>% 
+  filter(ID == "1")
+
+# Plot them
+ggplot() + 
+  geom_sf(joined_data_piv_t, mapping = aes()) +
+  geom_sf(test, mapping = aes(fill = "red")) # Yes appears that it does extract one grid cell at a time...
+
 ```
 
 
@@ -308,6 +320,96 @@ joined_w_season_o <- joined_w_seasons %>%
 
 
 ```
+# Look a this by exact_extract methods 
+```{r}
+summer_rains <- c("Jul", "Aug", "Sep")
+winter_rains <- c("Nov", "Dec", "Jan", "Feb", "Mar")
+
+joined_w_seasons_t <- joined_data_piv_t  %>%
+  mutate(rain_seasons = case_when(ppt_month %in% winter_rains ~ "winter_season",
+                                 ppt_month %in% summer_rains ~ "summer_season",
+                                TRUE ~ "else_months") )
+
+joined_w_season_o_t<- joined_w_seasons_t %>% 
+   group_by(ID, rain_seasons) %>% 
+   reframe(season_ppt_perc = sum(avg_month_ppt_percent), total_ppt)
+
+joined_w_season_o_t2<- joined_w_seasons_t %>% 
+   group_by(ID, rain_seasons) %>% 
+   mutate(season_ppt_perc = sum(avg_month_ppt_percent))
+
+son_spatial_summary_df <- distinct(joined_w_season_o_t2, ID, x, total_ppt, rain_seasons, season_ppt_perc)
+
+
+son_summary_df <- distinct(joined_w_season_o_t, ID, rain_seasons, season_ppt_perc, total_ppt, .keep_all = TRUE)
+
+```
+### Create a plot to illustrate the distribution of rain % over the Deserts
+```{r}
+### Sonoran 
+
+# Compare the % of Winter percipitation and % of summer percipitation as compared the average percipitation per grid cell. 
+
+ggplot(son_summary_df, mapping = aes(x = total_ppt, y = season_ppt_perc)) +
+  geom_point() + 
+  facet_wrap(~rain_seasons) + 
+  theme_bw() +
+  ggtitle("Precipitation Relation by Season to 1990s averaged sum") + 
+  xlab("Total Percipitation (mm)") +
+  ylab("% Percipitation by Season")
+
+## Justify the W -> E claim.
+
+# First just by looking at general trends by overlaying on a map 
+ggplot() + 
+  geom_sf(son_spatial_summary_df, mapping = aes(fill = season_ppt_perc)) + 
+  facet_wrap(~rain_seasons) +
+  scale_fill_gradientn(
+      colours = colorRampPalette((RColorBrewer::brewer.pal(11, "YlGnBu")))(9), 
+      na.value = "#808080" # The line that denotes NAs as grey
+    ) + 
+  theme_bw()
+
+# Convert geom to lon lat so we can do some scatterplotting 
+centroid_son_summary_df <- son_spatial_summary_df %>% 
+  st_centroid()
+
+
+xy_df <- centroid_son_summary_df %>% 
+    ungroup() %>% 
+   dplyr::mutate(lon = sf::st_coordinates(.)[,1],
+                lat = sf::st_coordinates(.)[,2])
+
+ggplot(xy_df, aes(x = lon, y = season_ppt_perc, col = lat)) +
+  geom_point() +
+  scale_color_viridis_b() +
+  facet_wrap(~rain_seasons) +
+  ggtitle("Sonoran Seasonal Trends across Longitude") +
+  xlab("Decimal Longitude") + 
+  ylab("Percentage of Seasonal Percipitation") +
+  theme_bw()
+
+# ...
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 # Join back up with the gridded map
 ```{r}
